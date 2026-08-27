@@ -1,4 +1,5 @@
 import { initializeApp } from "firebase/app";
+import { getAuth, setPersistence, browserLocalPersistence } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
@@ -16,5 +17,10 @@ if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
 }
 
 const app = initializeApp(firebaseConfig);
+
+export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+
+// Keep the web Firebase session across WebView/browser restarts.
+export const authPersistenceReady = setPersistence(auth, browserLocalPersistence);

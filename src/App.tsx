@@ -1,152 +1,144 @@
 import { useEffect, useState } from "react";
-import { collection, doc, getDoc, getDocs, limit, query, where } from "firebase/firestore";
-import { CheckCircle2, Copy, MessageCircle, X } from "lucide-react";
-import { db } from "./firebase";
+import { onAuthStateChanged, signInWithCustomToken, User } from "firebase/auth";
+import { MessageCircle, WifiOff } from "lucide-react";
+import { auth, authPersistenceReady } from "./firebase";
 import Chat from "./Chat";
 
-const STORAGE_KEY = "nt_chat_verified_uid";
+const AUTH_TIMEOUT_MS = 20_000;
+
+declare global {
+  interface Window {
+    /**
+     * Android calls this after the Chat WebView is loaded.
+     *
+     * The argument must be the short-lived Firebase ID token belonging
+     * to the currently signed-in Android Firebase user.
+     *
+     * The token is exchanged server-side for a Firebase custom token;
+     * it is never treated as a UID and is never stored in localStorage.
+     */
+    __NT_SET_FIREBASE_ID_TOKEN__?: (idToken: string) => void;
+  }
+}
 
 export default function App() {
-  const [uid, setUid] = useState("");
-  const [verifiedUid, setVerifiedUid] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [verifying, setVerifying] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [handoffStarted, setHandoffStarted] = useState(false);
   const [error, setError] = useState("");
-  const [showUid, setShowUid] = useState(true);
 
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) setVerifiedUid(saved);
-    setLoading(false);
-  }, []);
+    let active = true;
 
-  async function verify() {
-    const value = uid.trim();
-    setError("");
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (!active) return;
+      setUser(firebaseUser);
+      setAuthReady(true);
+      if (firebaseUser) setError("");
+    });
 
-    if (!value) {
-      setError("Please enter your Firebase UID.");
-      return;
-    }
-
-    setVerifying(true);
-    try {
-      // UID is used as the existing user's identifier. We only accept
-      // a UID that exists in the existing users collection.
-      const userDoc = await getDoc(doc(db, "users", value));
-
-      if (userDoc.exists()) {
-        localStorage.setItem(STORAGE_KEY, value);
-        setVerifiedUid(value);
-        setShowUid(true);
+    // Android calls this function through WebView.evaluateJavascript().
+    // Do not pass a UID. Pass the Firebase ID token.
+    window.__NT_SET_FIREBASE_ID_TOKEN__ = async (idToken: string) => {
+      if (!idToken || typeof idToken !== "string") {
+        setError("Invalid authentication handoff.");
         return;
       }
 
-      // Fallback: some existing projects may not have users/{uid} documents
-      // but may have a uid field. Keep lookup read-only.
-      const q = query(
-        collection(db, "users"),
-        where("uid", "==", value),
-        limit(1)
-      );
-      const snap = await getDocs(q);
+      setHandoffStarted(true);
+      setError("");
 
-      if (!snap.empty) {
-        localStorage.setItem(STORAGE_KEY, value);
-        setVerifiedUid(value);
-        setShowUid(true);
-      } else {
-        setError("UID not found. Please check the UID and try again.");
+      try {
+        await authPersistenceReady;
+
+        const response = await fetch("/api/auth/exchange", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ idToken }),
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || !result.customToken) {
+          throw new Error(result.error || "Unable to authenticate this device.");
+        }
+
+        await signInWithCustomToken(auth, result.customToken);
+      } catch (e: any) {
+        console.error("Chat authentication handoff failed:", e);
+        setError(e?.message || "Unable to authenticate. Please reopen Chat.");
+      } finally {
+        setHandoffStarted(false);
       }
-    } catch (e: any) {
-      setError(e?.message || "Unable to verify UID.");
-    } finally {
-      setVerifying(false);
-    }
+    };
+
+    return () => {
+      active = false;
+      unsubscribe();
+      delete window.__NT_SET_FIREBASE_ID_TOKEN__;
+    };
+  }, []);
+
+  // If the WebView already has a valid Firebase web session, this will
+  // resolve without requiring Android to send another token.
+  if (!authReady) {
+    return <LoadingScreen text="Connecting to Chat…" />;
   }
 
-  function clearSavedUid() {
-    localStorage.removeItem(STORAGE_KEY);
-    setVerifiedUid(null);
-    setUid("");
-    setShowUid(true);
-  }
-
-  if (loading) {
-    return <div className="screen-center"><div className="loader" /></div>;
-  }
-
-  if (!verifiedUid) {
-    return (
-      <div className="auth-screen">
-        <div className="auth-card">
-          <div className="brand-mark"><MessageCircle size={25} /></div>
-          <h1>Next Toppers Chat</h1>
-          <p>Enter your Firebase UID to verify your account and open your chats.</p>
-
-          <input
-            className="uid-input"
-            value={uid}
-            onChange={(e) => setUid(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") verify(); }}
-            placeholder="Enter your Firebase UID"
-            autoComplete="off"
-            spellCheck={false}
-          />
-
-          {error && <div className="error-box">{error}</div>}
-
-          <button className="primary-btn" onClick={verify} disabled={verifying}>
-            <CheckCircle2 size={18} />
-            {verifying ? "Verifying…" : "Verify & Open Chat"}
-          </button>
-
-          <small>Your UID is used to find your existing Next Toppers account and chats.</small>
-        </div>
-      </div>
-    );
+  if (user) {
+    return <Chat currentUid={user.uid} />;
   }
 
   return (
-    <div className="app-shell">
-      {showUid && (
-        <header className="identity-bar">
-          <div className="identity-content">
-            <div className="identity-title">Your Firebase UID</div>
-            <div className="identity-uid">{verifiedUid}</div>
-          </div>
-          <div className="identity-actions">
-            <button
-              className="icon-btn"
-              title="Copy UID"
-              onClick={() => navigator.clipboard?.writeText(verifiedUid)}
-            >
-              <Copy size={18} />
-            </button>
-            <button
-              className="icon-btn"
-              title="Hide UID"
-              onClick={() => setShowUid(false)}
-            >
-              <X size={18} />
-            </button>
-          </div>
-        </header>
-      )}
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="brand-mark">
+          {error ? <WifiOff size={25} /> : <MessageCircle size={25} />}
+        </div>
 
-      {!showUid && (
-        <header className="identity-bar compact-bar">
-          <div className="identity-content">
-            <div className="identity-title">Next Toppers Chat</div>
-            <div className="identity-subtitle">UID verified</div>
+        <h1>{error ? "Chat connection failed" : "Connecting your account"}</h1>
+
+        <p>
+          {error
+            ? error
+            : handoffStarted
+              ? "Verifying your Firebase account…"
+              : "Waiting for the signed-in Next Toppers account…"}
+        </p>
+
+        {!error && (
+          <div className="handoff-loader">
+            <div className="loader" />
           </div>
-          <button className="icon-btn" onClick={() => setShowUid(true)}>
-            <MessageCircle size={18} />
+        )}
+
+        {error && (
+          <button
+            className="primary-btn"
+            onClick={() => window.location.reload()}
+          >
+            Try again
           </button>
-        </header>
-      )}
+        )}
 
-      <Chat currentUid={verifiedUid} />
+        <small>
+          Your Firebase UID is obtained from the authenticated Firebase
+          session. It is never used as a password or as standalone proof of identity.
+        </small>
+      </div>
+    </div>
+  );
+}
+
+function LoadingScreen({ text }: { text: string }) {
+  return (
+    <div className="screen-center">
+      <div className="loading-stack">
+        <div className="loader" />
+        <span>{text}</span>
+      </div>
     </div>
   );
 }
