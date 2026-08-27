@@ -1,7 +1,152 @@
-import {useEffect,useState} from 'react'; import {onAuthStateChanged,signInWithPopup,signOut,User} from 'firebase/auth'; import {doc,setDoc,serverTimestamp} from 'firebase/firestore'; import {ArrowLeft,Copy,LogIn,X} from 'lucide-react'; import {auth,db,googleProvider} from './firebase'; import Chat from './Chat';
-export default function App(){const[user,setUser]=useState<User|null>(null);const[loading,setLoading]=useState(true);const[uid,setUid]=useState('');const[verified,setVerified]=useState(false);const[err,setErr]=useState('');const[showUid,setShowUid]=useState(true);
-useEffect(()=>onAuthStateChanged(auth,u=>{setUser(u);setLoading(false);if(u){setUid(u.uid);setVerified(localStorage.getItem('nt_chat_uid')===u.uid);setDoc(doc(db,'users',u.uid),{uid:u.uid,name:u.displayName??'Student',displayName:u.displayName??'Student',photoURL:u.photoURL??null,email:u.email??null,isOnline:true,lastSeen:serverTimestamp()},{merge:true}).catch(()=>{});}}),[]);
-if(loading)return <div className="center"><div className="loader"/></div>; if(!user)return <div className="auth"><div className="card"><div className="logo">NT</div><h1>Next Toppers Chat</h1><p>Sign in with the same Google account used in the app.</p>{err&&<div className="error">{err}</div>}<button className="primary" onClick={()=>signInWithPopup(auth,googleProvider).catch(e=>setErr(e.message))}><LogIn size={18}/> Continue with Google</button></div></div>;
-const verify=()=>{if(uid!==user.uid){setErr('The UID does not match this signed-in Firebase account.');return;}localStorage.setItem('nt_chat_uid',uid);setVerified(true);setShowUid(false);};
-if(!verified)return <div className="auth"><div className="card"><h1>Verify Chat UID</h1><p>Enter the Firebase UID for this signed-in account. It is checked against Firebase Authentication.</p><input value={uid} onChange={e=>setUid(e.target.value)} className="uid" placeholder="Firebase UID"/>{err&&<div className="error">{err}</div>}<button className="primary" onClick={verify}>Verify & Open Chat</button><button className="link" onClick={()=>signOut(auth)}>Use another account</button></div></div>;
-return <div className="shell"><header className="identity"><button className="icon" onClick={()=>history.back()}><ArrowLeft size={19}/></button><div className="identity-main">{showUid?<><small>Your Chat UID</small><b>{user.uid}</b></>:<><small>Next Toppers Chat</small><b>{user.displayName||user.email||'Signed in'}</b></>}</div><div className="actions">{showUid&&<button className="icon" onClick={()=>navigator.clipboard?.writeText(user.uid)}><Copy size={17}/></button>}<button className="icon" onClick={()=>setShowUid(v=>!v)}><X size={17}/></button></div></header><Chat currentUid={user.uid}/></div>}
+import { useEffect, useState } from "react";
+import { collection, doc, getDoc, getDocs, limit, query, where } from "firebase/firestore";
+import { CheckCircle2, Copy, MessageCircle, X } from "lucide-react";
+import { db } from "./firebase";
+import Chat from "./Chat";
+
+const STORAGE_KEY = "nt_chat_verified_uid";
+
+export default function App() {
+  const [uid, setUid] = useState("");
+  const [verifiedUid, setVerifiedUid] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState("");
+  const [showUid, setShowUid] = useState(true);
+
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) setVerifiedUid(saved);
+    setLoading(false);
+  }, []);
+
+  async function verify() {
+    const value = uid.trim();
+    setError("");
+
+    if (!value) {
+      setError("Please enter your Firebase UID.");
+      return;
+    }
+
+    setVerifying(true);
+    try {
+      // UID is used as the existing user's identifier. We only accept
+      // a UID that exists in the existing users collection.
+      const userDoc = await getDoc(doc(db, "users", value));
+
+      if (userDoc.exists()) {
+        localStorage.setItem(STORAGE_KEY, value);
+        setVerifiedUid(value);
+        setShowUid(true);
+        return;
+      }
+
+      // Fallback: some existing projects may not have users/{uid} documents
+      // but may have a uid field. Keep lookup read-only.
+      const q = query(
+        collection(db, "users"),
+        where("uid", "==", value),
+        limit(1)
+      );
+      const snap = await getDocs(q);
+
+      if (!snap.empty) {
+        localStorage.setItem(STORAGE_KEY, value);
+        setVerifiedUid(value);
+        setShowUid(true);
+      } else {
+        setError("UID not found. Please check the UID and try again.");
+      }
+    } catch (e: any) {
+      setError(e?.message || "Unable to verify UID.");
+    } finally {
+      setVerifying(false);
+    }
+  }
+
+  function clearSavedUid() {
+    localStorage.removeItem(STORAGE_KEY);
+    setVerifiedUid(null);
+    setUid("");
+    setShowUid(true);
+  }
+
+  if (loading) {
+    return <div className="screen-center"><div className="loader" /></div>;
+  }
+
+  if (!verifiedUid) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <div className="brand-mark"><MessageCircle size={25} /></div>
+          <h1>Next Toppers Chat</h1>
+          <p>Enter your Firebase UID to verify your account and open your chats.</p>
+
+          <input
+            className="uid-input"
+            value={uid}
+            onChange={(e) => setUid(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") verify(); }}
+            placeholder="Enter your Firebase UID"
+            autoComplete="off"
+            spellCheck={false}
+          />
+
+          {error && <div className="error-box">{error}</div>}
+
+          <button className="primary-btn" onClick={verify} disabled={verifying}>
+            <CheckCircle2 size={18} />
+            {verifying ? "Verifying…" : "Verify & Open Chat"}
+          </button>
+
+          <small>Your UID is used to find your existing Next Toppers account and chats.</small>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app-shell">
+      {showUid && (
+        <header className="identity-bar">
+          <div className="identity-content">
+            <div className="identity-title">Your Firebase UID</div>
+            <div className="identity-uid">{verifiedUid}</div>
+          </div>
+          <div className="identity-actions">
+            <button
+              className="icon-btn"
+              title="Copy UID"
+              onClick={() => navigator.clipboard?.writeText(verifiedUid)}
+            >
+              <Copy size={18} />
+            </button>
+            <button
+              className="icon-btn"
+              title="Hide UID"
+              onClick={() => setShowUid(false)}
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </header>
+      )}
+
+      {!showUid && (
+        <header className="identity-bar compact-bar">
+          <div className="identity-content">
+            <div className="identity-title">Next Toppers Chat</div>
+            <div className="identity-subtitle">UID verified</div>
+          </div>
+          <button className="icon-btn" onClick={() => setShowUid(true)}>
+            <MessageCircle size={18} />
+          </button>
+        </header>
+      )}
+
+      <Chat currentUid={verifiedUid} />
+    </div>
+  );
+}
